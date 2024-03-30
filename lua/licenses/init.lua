@@ -17,6 +17,15 @@
 -]]
 M = {}
 
+M.config = {
+	-- name to include on license headers
+	name = "John Doe",
+	-- email to include on license headers
+	email = "john.doe@email.com",
+}
+
+local found_curl, curl = pcall(require, "cURL.safe")
+
 local api = vim.api
 local buf, win
 
@@ -76,8 +85,10 @@ end
 -- TODO: telescope plugin
 -- TODO: investigate plenary.async for faster loading
 M.list = function(id)
-	local http = require("socket.http")
-	local ltn12 = require("ltn12")
+	if not found_curl then
+		error("missing dependency lua-curl")
+		return {}, false
+	end
 
 	local url = "https://api.github.com/licenses"
 	if id ~= nil then
@@ -90,35 +101,48 @@ M.list = function(id)
 	local link = url
 	local pages_remain = false
 	while pages_remain do
-		local r = {}
-		local _, code, headers = http.request({
+		local request = curl.easy_init()
+		request:setopt({
 			url = link,
-			method = "GET",
-			sink = ltn12.sink.table(r),
 			headers = {
 				accept = "application/vnd.github+json",
 				["X-GitHub-Api-Version"] = "2022-11-28",
 			},
 		})
+		request:setopt_http_version(curl.HTTP_VERSION_1_1)
+
+		local result_data = {}
+		local result_headers = {}
+		request:setopt_writefunction(table.insert, result_data)
+		request:setopt_headerfunction(table.insert, result_headers)
+
+		local ok, err = request.perform()
+		if not ok then
+			error("error making request: " .. err)
+			return {}, false
+		end
+		local code = request:getinfo_response_code()
 
 		if code ~= 200 then
-			error(string.format("error getting licenses; received %d response: %s", code, r))
-			return {}
+			error(string.format("error getting licenses; received %d response: %s", code, result_data))
+			return {}, false
 		end
 
 		table.insert(results, {
-			id = r.key,
-			name = r.name,
-			url = r.url,
-			body = r.body,
-			description = r.description,
+			id = result_data.key,
+			name = result_data.name,
+			url = result_data.url,
+			body = result_data.body,
+			description = result_data.description,
 		})
 
-		link = string.match(headers.link, '<(.-)>; rel="next"')
+		link = string.match(result_headers.link, '<(.-)>; rel="next"')
 		pages_remain = string.len(link) ~= 0
+
+		request:close()
 	end
 
-	return results
+	return results, true
 end
 
 local function center(str)
@@ -130,7 +154,11 @@ end
 M.update_view = function()
 	api.nvim_buf_set_option(buf, "modifiable", true)
 
-	local data = M.list()
+	local data, ok = M.list()
+	print("list: " .. ok)
+	if not ok then
+		return false
+	end
 	table.sort(data, function(a, b)
 		return a.id:lower() < b.id:lower()
 	end)
@@ -151,12 +179,16 @@ M.update_view = function()
 	end
 
 	api.nvim_buf_set_option(buf, "modifiable", false)
+
+	return true
 end
 
 local function set_mappings()
 	local mappings = {
 		["k"] = "move_cursor()",
 		["q"] = "close_window()",
+		["H"] = "add_header()",     -- TODO: implement
+		["i"] = "add_license_file()", -- TODO: implement
 	}
 
 	for k, v in pairs(mappings) do
@@ -179,10 +211,17 @@ M.close_window = function()
 	api.nvim_win_close(win, true)
 end
 
+-- TODO: implement
+M.update_headers_year = function() end
+
 M.licenses = function()
 	open_window()
 	set_mappings()
-	M.update_view()
+	local ok = M.update_view()
+	if not ok then
+		M.close_window()
+		return
+	end
 	api.nvim_win_set_cursor(win, { 3, 0 })
 end
 
